@@ -1,83 +1,201 @@
+# -*- coding: utf-8 -*-
 import arcpy
 import os
 
-# Parámetros de entrada
-gdb_in = r"D:\CURSO_ARCGIS_PRO\INSUMOS_CURSO\Servicio-205\Test_to_cut.gdb"       # GDB original
-gdb_out = r"D:\CURSO_ARCGIS_PRO\INSUMOS_CURSO\Servicio-205\Carto100k_test.gdb"       # GDB destino
-clip_feature = r"D:\CURSO_ARCGIS_PRO\CURSO_ARCGIS_PRO\CURSO_ARCGIS_PRO.gdb\AOI"    # Polígono para cortar
+# ==================================================
+# PARÁMETROS
+# ==================================================
 
-# Crear GDB de salida si no existe
-if not arcpy.Exists(gdb_out):
-    arcpy.CreateFileGDB_management(os.path.dirname(gdb_out),
-                                   os.path.basename(gdb_out))
+gdb_origen = r"C:\ruta\TempCarto.gdb"
 
-# --- CORREGIDO: Copiar todos los dominios de gdb_in a gdb_out ---
-print("Copiando dominios entre Geodatabases...")
-domains = arcpy.da.ListDomains(gdb_in)
-for domain in domains:
-    # Solo procesamos si el dominio no existe ya en la de destino
-    if domain.name not in [d.name for d in arcpy.da.ListDomains(gdb_out)]:
-        try:
-            # Ruta temporal para exportar el dominio
-            temp_dom_table = "memory/temp_dom_table"
-            
-            # Exportar dominio de origen a tabla en memoria
-            arcpy.management.DomainToTable(gdb_in, domain.name, temp_dom_table, 
-                                           "code", "description")
-            
-            # Importar tabla en memoria como dominio en GDB de destino
-            arcpy.management.TableToDomain(temp_dom_table, "code", "description", 
-                                           gdb_out, domain.name, domain.description, 
-                                           "REPLACE")
-            
-            # Línea corregida: Usamos arcpy.Delete_management directamente
-            arcpy.Delete_management(temp_dom_table)
-            
-        except Exception as e:
-            print(f"No se pudo copiar el dominio {domain.name}: {e}")
-print("Dominios copiados con éxito.\n")
+gdb_destino = r"C:\ruta\CartoCutTest.gdb"
 
-# -------------------------------------------------------------
+poligono_corte = r"C:\rutan\temp.gdb\AOI"
 
-arcpy.env.workspace = gdb_in
+xml_temp = r"C:\ruta\SchemaTemp.xml"
+
+# ==================================================
+# CONFIGURACIÓN
+# ==================================================
+
+arcpy.env.overwriteOutput = True
+
+# ==================================================
+# CREAR GDB DESTINO
+# ==================================================
+
+if not arcpy.Exists(gdb_destino):
+
+    carpeta = os.path.dirname(gdb_destino)
+    nombre_gdb = os.path.basename(gdb_destino)
+
+    arcpy.management.CreateFileGDB(
+        carpeta,
+        nombre_gdb
+    )
+
+# ==================================================
+# EXPORTAR ESQUEMA COMPLETO
+# ==================================================
+
+print("Exportando esquema de la GDB origen...")
+
+arcpy.management.ExportXMLWorkspaceDocument(
+    in_data=gdb_origen,
+    out_file=xml_temp,
+    export_type="SCHEMA_ONLY",
+    storage_type="BINARY"
+)
+
+# ==================================================
+# IMPORTAR ESQUEMA
+# ==================================================
+
+print("Importando esquema en GDB destino...")
+
+arcpy.management.ImportXMLWorkspaceDocument(
+    target_geodatabase=gdb_destino,
+    in_file=xml_temp,
+    import_type="SCHEMA_ONLY"
+)
+
+# ==================================================
+# VACIAR TABLAS Y FEATURE CLASSES
+# (por seguridad)
+# ==================================================
+
+print("Limpiando datasets...")
+
+arcpy.env.workspace = gdb_destino
+
+# FC en raíz
+for fc in arcpy.ListFeatureClasses():
+    arcpy.management.DeleteRows(fc)
+
+# Tablas
+for tabla in arcpy.ListTables():
+    arcpy.management.DeleteRows(tabla)
+
+# Feature datasets
+for fds in arcpy.ListDatasets("", "Feature"):
+
+    arcpy.env.workspace = os.path.join(gdb_destino, fds)
+
+    for fc in arcpy.ListFeatureClasses():
+        arcpy.management.DeleteRows(fc)
+
+# ==================================================
+# RECORTE DE FEATURE CLASSES
+# ==================================================
+
+print("Iniciando proceso de recorte...")
+
+arcpy.env.workspace = gdb_origen
+
 datasets = arcpy.ListDatasets("", "Feature")
 
-for ds in datasets:
-    ds_in = os.path.join(gdb_in, ds)
-    sr = arcpy.Describe(ds_in).spatialReference
-    ds_out = os.path.join(gdb_out, ds)
-    if not arcpy.Exists(ds_out):
-        arcpy.CreateFeatureDataset_management(gdb_out, ds, sr)
+if datasets is None:
+    datasets = []
 
-    arcpy.env.workspace = ds_in
-    feature_classes = arcpy.ListFeatureClasses()
+datasets.insert(0, "")
 
-    for fc in feature_classes:
-        fc_in = os.path.join(ds_in, fc)
-        fc_out = os.path.join(ds_out, fc)
+for dataset in datasets:
 
-        # Crear feature class con mismo esquema
-        desc = arcpy.Describe(fc_in)
-        arcpy.CreateFeatureclass_management(ds_out, fc,
-                                            geometry_type=desc.shapeType,
-                                            spatial_reference=desc.spatialReference)
+    if dataset == "":
+        workspace_actual = gdb_origen
+    else:
+        workspace_actual = os.path.join(
+            gdb_origen,
+            dataset
+        )
 
-        # Copiar campos
-        fields = [f for f in arcpy.ListFields(fc_in) if f.type not in ("OID", "Geometry")]
-        for f in fields:
-            arcpy.AddField_management(fc_out, f.name, f.type,
-                                      f.precision, f.scale, f.length,
-                                      f.aliasName, f.isNullable, f.required)
+    arcpy.env.workspace = workspace_actual
 
-        # Copiar dominios (Ahora sí funcionará porque ya existen en gdb_out)
-        for f in fields:
-            if f.domain:
-                arcpy.AssignDomainToField_management(fc_out, f.name, f.domain)
+    fc_list = arcpy.ListFeatureClasses()
 
-        # Cortar datos y añadirlos
-        temp_clip = "memory/temp_clip" # Cambiado 'in_memory' a 'memory' (más moderno y rápido en Pro)
-        arcpy.Clip_analysis(fc_in, clip_feature, temp_clip)
-        arcpy.Append_management(temp_clip, fc_out, "NO_TEST")
-        arcpy.Delete_management(temp_clip)
+    if not fc_list:
+        continue
 
-        print(f"Capa {fc} cortada y exportada con dominios en {fc_out}")
+    for fc in fc_list:
+
+        try:
+
+            print(f"Procesando {fc}")
+
+            if dataset == "":
+
+                fc_origen = os.path.join(
+                    gdb_origen,
+                    fc
+                )
+
+                fc_destino = os.path.join(
+                    gdb_destino,
+                    fc
+                )
+
+            else:
+
+                fc_origen = os.path.join(
+                    gdb_origen,
+                    dataset,
+                    fc
+                )
+
+                fc_destino = os.path.join(
+                    gdb_destino,
+                    dataset,
+                    fc
+                )
+
+            temp_clip = rf"memory\clip_{fc}"
+
+            if arcpy.Exists(temp_clip):
+                arcpy.management.Delete(temp_clip)
+
+            # -----------------------------------
+            # CLIP
+            # -----------------------------------
+
+            arcpy.analysis.Clip(
+                fc_origen,
+                poligono_corte,
+                temp_clip
+            )
+
+            # -----------------------------------
+            # APPEND
+            # -----------------------------------
+
+            resultado = int(
+                arcpy.management.GetCount(
+                    temp_clip
+                )[0]
+            )
+
+            if resultado > 0:
+
+                arcpy.management.Append(
+                    temp_clip,
+                    fc_destino,
+                    "NO_TEST"
+                )
+
+            arcpy.management.Delete(temp_clip)
+
+            print(f"  Registros cargados: {resultado}")
+
+        except Exception as e:
+
+            print(
+                f"ERROR en {fc}: {str(e)}"
+            )
+
+# ==================================================
+# ELIMINAR XML TEMPORAL
+# ==================================================
+
+if os.path.exists(xml_temp):
+    os.remove(xml_temp)
+
+print("\nProceso finalizado correctamente.")
